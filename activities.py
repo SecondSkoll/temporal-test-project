@@ -9,6 +9,7 @@ from typing import List
 from urllib.parse import urlparse
 
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 
 from config import load_settings
 from llm_client import LiteLLMClient
@@ -242,7 +243,18 @@ async def generate_doc_section_activity(request: GenerateSectionRequest) -> Gene
         f"Repository context JSON:\\n{request.context}"
     )
 
-    content = await client.generate_markdown(system_prompt=system_prompt, user_prompt=user_prompt)
+    try:
+        content = await client.generate_markdown(
+            system_prompt=system_prompt, user_prompt=user_prompt
+        )
+    except Exception as exc:
+        # Keep failure payloads small to avoid Temporal size-limit errors.
+        error_text = str(exc).strip() or exc.__class__.__name__
+        raise ApplicationError(
+            f"LLM request failed for {request.file_name}: {error_text[:240]}",
+            type="LLMRequestFailure",
+        ) from None
+
     title = request.file_name.replace(".md", "").replace("_", " ").title()
     return GeneratedDoc(file_name=request.file_name, title=title, content=content)
 

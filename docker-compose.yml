@@ -12,6 +12,7 @@ services:
       - POSTGRES_USER=temporal
       - POSTGRES_PWD=temporal
       - POSTGRES_SEEDS=postgres
+      - DEFAULT_NAMESPACE=doc-funnel
     depends_on:
       - postgres
 

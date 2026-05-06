@@ -35,6 +35,12 @@ class DocumentationWorkflow:
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=retry_policy,
         )
+        if isinstance(validated, dict):
+            validated_repo_url = validated["repo_url"]
+            validated_max_files = int(validated.get("max_files", 300))
+        else:
+            validated_repo_url = validated.repo_url
+            validated_max_files = int(validated.max_files)
 
         repo_path = await workflow.execute_activity(
             "fetch_repo_activity",
@@ -45,7 +51,7 @@ class DocumentationWorkflow:
 
         inventory: RepoInventory = await workflow.execute_activity(
             "inventory_repo_activity",
-            args=[repo_path, validated.max_files],
+            args=[repo_path, validated_max_files],
             start_to_close_timeout=timedelta(seconds=180),
             retry_policy=retry_policy,
         )
@@ -66,7 +72,7 @@ class DocumentationWorkflow:
                     instruction=instruction,
                     context=context,
                 ),
-                start_to_close_timeout=timedelta(seconds=120),
+                start_to_close_timeout=timedelta(minutes=10),
                 retry_policy=retry_policy,
             )
             docs.append(generated)
@@ -81,7 +87,7 @@ class DocumentationWorkflow:
         persisted: PersistArtifactsResult = await workflow.execute_activity(
             "persist_artifacts_activity",
             PersistArtifactsInput(
-                repo_url=validated.repo_url,
+                repo_url=validated_repo_url,
                 docs=docs,
                 warnings=warnings,
             ),
@@ -92,7 +98,7 @@ class DocumentationWorkflow:
         final_warnings = await workflow.execute_activity(
             "emit_summary_activity",
             EmitSummaryInput(
-                repo_url=validated.repo_url,
+                repo_url=validated_repo_url,
                 generated_files=persisted.generated_files,
                 warnings=warnings,
             ),
@@ -102,7 +108,7 @@ class DocumentationWorkflow:
 
         return DocGenResult(
             run_id=workflow.info().run_id,
-            repo_url=validated.repo_url,
+            repo_url=validated_repo_url,
             artifact_path=persisted.artifact_path,
             generated_files=persisted.generated_files,
             warnings=final_warnings,

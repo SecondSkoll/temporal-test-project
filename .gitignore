@@ -1,2 +1,4 @@
 .venv
 .pytest*
+__pycache__
+TODO*
