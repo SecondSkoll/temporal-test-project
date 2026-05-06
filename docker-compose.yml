@@ -1,0 +1,36 @@
+version: "3.8"
+
+services:
+  temporal:
+    image: temporalio/auto-setup:1.27.2
+    container_name: doc-funnel-temporal
+    ports:
+      - "7233:7233"
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=postgres
+    depends_on:
+      - postgres
+
+  temporal-ui:
+    image: temporalio/ui:2.34.0
+    container_name: doc-funnel-temporal-ui
+    ports:
+      - "8080:8080"
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
+    depends_on:
+      - temporal
+
+  postgres:
+    image: postgres:13
+    container_name: doc-funnel-postgres
+    environment:
+      - POSTGRES_USER=temporal
+      - POSTGRES_PASSWORD=temporal
+    ports:
+      - "5432:5432"
