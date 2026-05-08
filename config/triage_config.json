@@ -1,0 +1,76 @@
+{
+  "_comment": "Heuristics configuration for the mechanical triage activity (src/activities/triage.py). Adjust limits to balance LLM context quality against resource usage.",
+
+  "file_extraction": {
+    "_comment_readme": "Glob patterns (relative to repo root) matched for README files.",
+    "readme_patterns": [
+      "README",
+      "README.md",
+      "README.rst",
+      "README.txt",
+      "readme.md"
+    ],
+
+    "_comment_docs": "Directory names considered documentation roots. Searched recursively.",
+    "docs_directory_names": ["docs", "doc", "documentation", "man"],
+
+    "_comment_docs_extensions": "File extensions extracted from docs directories.",
+    "docs_file_extensions": [".md", ".rst", ".txt"],
+
+    "_comment_build": "Build/metadata filenames extracted from anywhere in the repo.",
+    "build_file_names": [
+      "Makefile",
+      "snapcraft.yaml",
+      "setup.py",
+      "pyproject.toml",
+      "CMakeLists.txt",
+      "meson.build"
+    ]
+  },
+
+  "size_limits": {
+    "_comment": "Guards to prevent resource exhaustion during triage.",
+    "max_file_size_bytes": 102400,
+    "max_total_bytes": 512000,
+    "min_files_before_fallback": 1
+  },
+
+  "clone_limits": {
+    "_comment": "Shallow clone constraints. Exceeding size_mb triggers manual triage routing.",
+    "depth": 1,
+    "timeout_seconds": 120,
+    "max_size_mb": 50
+  },
+
+  "exclude_patterns": {
+    "_comment": "Directory and file patterns to skip during os.walk traversal.",
+    "directories": [
+      ".git",
+      "node_modules",
+      "vendor",
+      ".tox",
+      "__pycache__",
+      ".mypy_cache",
+      "dist",
+      "build",
+      ".eggs"
+    ],
+    "file_extensions": [
+      ".pyc",
+      ".pyo",
+      ".so",
+      ".a",
+      ".o",
+      ".png",
+      ".jpg",
+      ".jpeg",
+      ".gif",
+      ".svg",
+      ".ico",
+      ".whl",
+      ".zip",
+      ".tar",
+      ".gz"
+    ]
+  }
+}

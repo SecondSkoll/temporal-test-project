@@ -1,0 +1,72 @@
+# charm/metadata.yaml
+# ====================
+# Juju charm metadata for the Ubuntu Package Documentation Pipeline worker.
+# See: https://juju.is/docs/sdk/metadata-reference
+
+name: docs-pipeline-worker
+display-name: Ubuntu Docs Pipeline Worker
+summary: Temporal worker for AI-optimised Ubuntu package documentation generation.
+description: |
+  Deploys and manages the Temporal worker that orchestrates the full documentation
+  generation lifecycle for Ubuntu packages. Integrates with a Charmed Temporal
+  cluster via the temporal-worker relation and writes generated Markdown artefacts
+  to a dedicated Git repository served over HTTP.
+
+min-juju-version: "3.3"
+
+bases:
+  - build-on:
+      - name: ubuntu
+        channel: "22.04"
+    run-on:
+      - name: ubuntu
+        channel: "22.04"
+
+# ── Relations ──────────────────────────────────────────────────────────────────
+requires:
+  temporal-worker:
+    interface: temporal-worker
+    limit: 1
+    description: |
+      Provides Temporal cluster connection details (frontend host, namespace)
+      from the Charmed Temporal cluster deployed via the temporal-k8s charm.
+
+# ── Configuration ──────────────────────────────────────────────────────────────
+config:
+  options:
+    temporal-host:
+      type: string
+      default: "temporal:7233"
+      description: "host:port of the Temporal frontend gRPC service"
+
+    temporal-namespace:
+      type: string
+      default: "default"
+      description: "Temporal namespace to use for all workflows"
+
+    task-queue:
+      type: string
+      default: "docs-pipeline"
+      description: "Temporal task queue name that the worker listens on"
+
+    llm-base-url:
+      type: string
+      default: ""
+      description: "Base URL of the OpenAI-compliant documentation generation endpoint"
+
+    llm-model:
+      type: string
+      default: "gpt-4o"
+      description: "Model identifier to request from the LLM endpoint"
+
+    docs-repo-url:
+      type: string
+      default: ""
+      description: "HTTPS URL of the Git repository that stores generated documentation"
+
+    max-clone-size-mb:
+      type: int
+      default: 50
+      description: |
+        Maximum upstream repository size (MB) for shallow cloning.
+        Repositories exceeding this limit are routed to the manual triage queue.

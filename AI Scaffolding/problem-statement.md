@@ -1,0 +1,3 @@
+# Problem Statement
+
+AI agents integrated into the Ubuntu operating system lack a centralized, authoritative source of Ubuntu-specific documentation for packages distributed through Canonical's infrastructure. Consequently, when encountering unfamiliar packages, these agents are forced to rely on generic external documentation, raw source code, and metadata, increasing the risk of confusing general information with Ubuntu-specific implementation details. There is an unmet need to dynamically generate, aggregate, and serve highly contextual, AI-optimized reference material that these agents can reliably query as their primary source of truth.

@@ -1,0 +1,21 @@
+# ── Core runtime ──────────────────────────────────────────────────────────────
+temporalio>=1.7.0        # Temporal Python SDK (workflows, activities, workers)
+pydantic>=2.7.0          # Data validation and serialisation for Temporal payloads
+pygit2>=1.15.0           # libgit2 bindings for Git operations (shallow clone, PAT auth)
+openai>=1.30.0           # OpenAI-compliant client for the LLM generation endpoint
+PyYAML>=6.0.1            # YAML index file read/write
+aiohttp>=3.9.0           # Async HTTP for health checks and agent endpoint
+
+# ── Config / secrets ──────────────────────────────────────────────────────────
+python-dotenv>=1.0.0     # Load .env files for local development secrets
+
+# ── Dev / mock server ─────────────────────────────────────────────────────────
+fastapi>=0.111.0         # Backing framework for mock_openai_server.py
+uvicorn[standard]>=0.29.0  # ASGI server to run the mock locally
+httpx>=0.27.0            # Async HTTP client used by FastAPI test client
+typer>=0.12.0            # CLI for trigger_workflow.py
+
+# ── Testing ───────────────────────────────────────────────────────────────────
+pytest>=8.2.0
+pytest-asyncio>=0.23.0   # Async test support for Temporal activities
+pytest-mock>=3.14.0      # Mocking helpers
