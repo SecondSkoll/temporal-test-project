@@ -22,6 +22,7 @@ import asyncio
 import logging
 
 from temporalio.client import Client
+from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.worker import Worker
 
 # Workflow definitions
@@ -60,6 +61,7 @@ async def main() -> None:
     client = await Client.connect(
         settings.TEMPORAL_HOST,
         namespace=settings.TEMPORAL_NAMESPACE,
+        data_converter=pydantic_data_converter,
     )
 
     async with Worker(

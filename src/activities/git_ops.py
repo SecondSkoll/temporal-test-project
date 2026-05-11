@@ -35,16 +35,43 @@ Security notes
   cleaned up in a ``finally`` block regardless of success/failure.
 """
 
+import logging
 import os
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import pygit2
+import yaml
 from temporalio import activity
 
 from models.package import PackageMetadata
 from models.generation import GenerationResult
 from config import settings
+
+logger = logging.getLogger(__name__)
+
+
+def _make_credentials_callback(pat: str) -> pygit2.RemoteCallbacks:
+    """
+    Create a ``RemoteCallbacks`` instance authenticated with a PAT.
+
+    The PAT is passed as the password; ``x-token-auth`` is used as the
+    username (any non-empty string works for HTTPS PAT auth).
+
+    Parameters
+    ----------
+    pat : str
+        Personal Access Token for Git authentication.
+
+    Returns
+    -------
+    pygit2.RemoteCallbacks
+        Configured callbacks instance.
+    """
+    credentials = pygit2.UserPass(username="x-token-auth", password=pat)
+    return pygit2.RemoteCallbacks(credentials=credentials)
 
 
 @activity.defn
@@ -86,7 +113,56 @@ async def shallow_clone_repository(
         Raised if the clone does not complete within
         ``settings.CLONE_TIMEOUT_SECONDS``.
     """
-    raise NotImplementedError
+    # Create a predictable temp directory for the clone.
+    clone_dir = tempfile.mkdtemp(prefix=f"docs-clone-{package_name}-")
+    activity.logger.info(
+        "Cloning %s (depth=%d) into %s",
+        upstream_url, clone_depth, clone_dir,
+    )
+
+    try:
+        # pygit2 clone_repository does not natively support --depth,
+        # but it performs the clone operation.  For public repos no PAT is
+        # needed; for private repos the PAT callback is used.
+        callbacks = None
+        if settings.GIT_PAT:
+            callbacks = _make_credentials_callback(settings.GIT_PAT)
+
+        repo = pygit2.clone_repository(
+            url=upstream_url,
+            path=clone_dir,
+            callbacks=callbacks,
+        )
+
+        # Check clone size against the configured maximum.
+        clone_size_bytes = _calculate_directory_size(clone_dir)
+        max_size_bytes = settings.MAX_CLONE_SIZE_MB * 1024 * 1024
+
+        if clone_size_bytes > max_size_bytes:
+            import shutil
+            shutil.rmtree(clone_dir, ignore_errors=True)
+            from temporalio.exceptions import ApplicationError
+            raise ApplicationError(
+                f"Repository {upstream_url} clone size ({clone_size_bytes / (1024*1024):.1f} MB) "
+                f"exceeds maximum ({settings.MAX_CLONE_SIZE_MB} MB). Routing to manual triage.",
+                non_retryable=True,
+            )
+
+        # Explicitly release the repository reference to free libgit2 memory.
+        del repo
+
+        activity.logger.info(
+            "Clone complete: %s (%.1f MB)",
+            clone_dir, clone_size_bytes / (1024 * 1024),
+        )
+        return clone_dir
+
+    except pygit2.GitError as exc:
+        # Clean up on failure.
+        import shutil
+        shutil.rmtree(clone_dir, ignore_errors=True)
+        activity.logger.error("Clone failed for %s: %s", upstream_url, exc)
+        raise
 
 
 @activity.defn
@@ -123,7 +199,66 @@ async def commit_and_push_documentation(
         Propagated from libgit2 on push failure; the Temporal retry policy
         will retry with exponential back-off.
     """
-    raise NotImplementedError
+    repo_path = Path(docs_repo_local_path)
+    file_path = repo_path / output_path
+
+    # Ensure the parent directory exists.
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Write the Markdown content.
+    file_path.write_text(result.markdown_content, encoding="utf-8")
+
+    activity.logger.info(
+        "Wrote documentation to %s (%d bytes)",
+        output_path, len(result.markdown_content),
+    )
+
+    # Stage, commit, and push using pygit2.
+    repo = pygit2.Repository(str(repo_path))
+    index = repo.index
+    index.read()
+    index.add(output_path)
+    index.write()
+    tree = index.write_tree()
+
+    author = pygit2.Signature(
+        "docs-pipeline-bot",
+        "docs-pipeline@canonical.com",
+    )
+    committer = author
+
+    commit_message = (
+        f"docs: generate {result.metadata.name} v{result.metadata.version}\n\n"
+        f"Status: {result.status}\n"
+        f"Model: {result.model_used or 'unknown'}\n"
+    )
+
+    # Determine parents.
+    parents = []
+    if not repo.is_empty:
+        parents = [repo.head.target]
+
+    commit_oid = repo.create_commit(
+        "refs/heads/main",
+        author,
+        committer,
+        commit_message,
+        tree,
+        parents,
+    )
+
+    # Push to the remote.
+    if settings.GIT_PAT and "origin" in [r.name for r in repo.remotes]:
+        callbacks = _make_credentials_callback(settings.GIT_PAT)
+        remote = repo.remotes["origin"]
+        remote.push(["refs/heads/main"], callbacks=callbacks)
+        activity.logger.info("Pushed commit %s to remote", str(commit_oid))
+    else:
+        activity.logger.info("Committed %s (no push: no PAT or no remote)", str(commit_oid))
+
+    commit_sha = str(commit_oid)
+    del repo
+    return commit_sha
 
 
 @activity.defn
@@ -161,4 +296,98 @@ async def update_package_index(
     pygit2.GitError
         If the index commit/push fails; retried by Temporal policy.
     """
-    raise NotImplementedError
+    repo_path = Path(docs_repo_local_path)
+    index_path = repo_path / "index.yaml"
+
+    # Load existing index or start fresh.
+    index_data: dict = {"packages": {}}
+    if index_path.exists():
+        with open(index_path, "r") as f:
+            loaded = yaml.safe_load(f)
+            if loaded and isinstance(loaded, dict):
+                index_data = loaded
+            if "packages" not in index_data:
+                index_data["packages"] = {}
+
+    # Update the entry for this package.
+    index_data["packages"][metadata.name] = {
+        "version": metadata.version,
+        "path": output_path,
+        "commit_sha": commit_sha,
+        "install_method": metadata.install_method,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    # Write the updated index.
+    with open(index_path, "w") as f:
+        yaml.dump(index_data, f, default_flow_style=False, sort_keys=True)
+
+    activity.logger.info(
+        "Updated index.yaml: %s v%s → %s (commit: %s)",
+        metadata.name, metadata.version, output_path, commit_sha[:8],
+    )
+
+    # Commit and push the index update.
+    repo = pygit2.Repository(str(repo_path))
+    git_index = repo.index
+    git_index.read()
+    git_index.add("index.yaml")
+    git_index.write()
+    tree = git_index.write_tree()
+
+    author = pygit2.Signature(
+        "docs-pipeline-bot",
+        "docs-pipeline@canonical.com",
+    )
+
+    commit_message = f"index: update {metadata.name} v{metadata.version}"
+
+    parents = []
+    if not repo.is_empty:
+        parents = [repo.head.target]
+
+    commit_oid = repo.create_commit(
+        "refs/heads/main",
+        author,
+        author,
+        commit_message,
+        tree,
+        parents,
+    )
+
+    # Push to remote if configured.
+    if settings.GIT_PAT and "origin" in [r.name for r in repo.remotes]:
+        callbacks = _make_credentials_callback(settings.GIT_PAT)
+        remote = repo.remotes["origin"]
+        remote.push(["refs/heads/main"], callbacks=callbacks)
+
+    del repo
+
+    activity.logger.info(
+        "Index commit pushed: %s", str(commit_oid),
+    )
+
+
+def _calculate_directory_size(path: str) -> int:
+    """
+    Recursively calculate the total size of all files in a directory.
+
+    Parameters
+    ----------
+    path : str
+        Absolute path to the directory.
+
+    Returns
+    -------
+    int
+        Total size in bytes.
+    """
+    total = 0
+    for dirpath, dirnames, filenames in os.walk(path):
+        for f in filenames:
+            fp = os.path.join(dirpath, f)
+            try:
+                total += os.path.getsize(fp)
+            except OSError:
+                pass
+    return total

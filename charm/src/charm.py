@@ -62,6 +62,9 @@ class DocsPipelineCharm(CharmBase):
     on.upgrade_charm    : Re-install dependencies and restart the worker.
     """
 
+    # Reference to the worker subprocess, held for the lifetime of the charm.
+    _worker_process: subprocess.Popen | None = None
+
     def __init__(self, *args):
         super().__init__(*args)
 
@@ -85,7 +88,31 @@ class DocsPipelineCharm(CharmBase):
         event : ops.InstallEvent
             The Juju install hook event (unused directly).
         """
-        raise NotImplementedError
+        self.unit.status = MaintenanceStatus("Installing dependencies...")
+
+        requirements_path = Path(self.charm_dir) / "requirements.txt"
+        if not requirements_path.exists():
+            # Try looking one level up (the main project root).
+            requirements_path = Path(self.charm_dir).parent / "requirements.txt"
+
+        if not requirements_path.exists():
+            self.unit.status = BlockedStatus("requirements.txt not found")
+            logger.error("Cannot find requirements.txt at %s", requirements_path)
+            return
+
+        try:
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "-r", str(requirements_path)],
+                timeout=300,
+            )
+            self.unit.status = MaintenanceStatus("Dependencies installed")
+            logger.info("Dependencies installed successfully")
+        except subprocess.CalledProcessError as exc:
+            self.unit.status = BlockedStatus(f"pip install failed: {exc.returncode}")
+            logger.error("pip install failed: %s", exc)
+        except subprocess.TimeoutExpired:
+            self.unit.status = BlockedStatus("pip install timed out")
+            logger.error("pip install timed out after 300s")
 
     def _on_start(self, event) -> None:
         """
@@ -100,7 +127,34 @@ class DocsPipelineCharm(CharmBase):
         event : ops.StartEvent
             The Juju start hook event (unused directly).
         """
-        raise NotImplementedError
+        if self._is_worker_running():
+            logger.info("Worker is already running")
+            return
+
+        env = self._build_worker_env()
+        worker_script = Path(self.charm_dir).parent / "src" / "main.py"
+
+        if not worker_script.exists():
+            self.unit.status = BlockedStatus("src/main.py not found")
+            logger.error("Worker script not found at %s", worker_script)
+            return
+
+        self.unit.status = MaintenanceStatus("Starting worker...")
+
+        try:
+            self._worker_process = subprocess.Popen(
+                [sys.executable, str(worker_script)],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.unit.status = ActiveStatus(
+                f"Worker running (PID: {self._worker_process.pid})"
+            )
+            logger.info("Worker started with PID %d", self._worker_process.pid)
+        except Exception as exc:
+            self.unit.status = BlockedStatus(f"Failed to start worker: {exc}")
+            logger.error("Failed to start worker: %s", exc)
 
     def _on_stop(self, event) -> None:
         """
@@ -114,7 +168,18 @@ class DocsPipelineCharm(CharmBase):
         event : ops.StopEvent
             The Juju stop hook event (unused directly).
         """
-        raise NotImplementedError
+        if self._worker_process is not None and self._is_worker_running():
+            logger.info("Stopping worker (PID: %d)...", self._worker_process.pid)
+            self._worker_process.terminate()
+            try:
+                self._worker_process.wait(timeout=30)
+                logger.info("Worker stopped gracefully")
+            except subprocess.TimeoutExpired:
+                logger.warning("Worker did not stop gracefully; killing...")
+                self._worker_process.kill()
+                self._worker_process.wait(timeout=10)
+        self._worker_process = None
+        self.unit.status = MaintenanceStatus("Worker stopped")
 
     def _on_config_changed(self, event) -> None:
         """
@@ -129,7 +194,9 @@ class DocsPipelineCharm(CharmBase):
         event : ops.ConfigChangedEvent
             The Juju config-changed hook event (unused directly).
         """
-        raise NotImplementedError
+        logger.info("Configuration changed; restarting worker...")
+        self._on_stop(event)
+        self._on_start(event)
 
     def _on_upgrade_charm(self, event) -> None:
         """
@@ -140,7 +207,10 @@ class DocsPipelineCharm(CharmBase):
         event : ops.UpgradeCharmEvent
             The Juju upgrade-charm hook event (unused directly).
         """
-        raise NotImplementedError
+        logger.info("Charm upgrade detected; re-installing and restarting...")
+        self._on_stop(event)
+        self._on_install(event)
+        self._on_start(event)
 
     def _build_worker_env(self) -> dict:
         """
@@ -155,7 +225,31 @@ class DocsPipelineCharm(CharmBase):
             A dict of environment variable names to values, suitable for
             passing as the ``env`` argument to ``subprocess.Popen``.
         """
-        raise NotImplementedError
+        import os
+        env = os.environ.copy()
+
+        # Temporal connection from charm config.
+        config = self.config
+        env["TEMPORAL_HOST"] = config.get("temporal-host", "temporal:7233")
+        env["TEMPORAL_NAMESPACE"] = config.get("temporal-namespace", "default")
+        env["TASK_QUEUE"] = config.get("task-queue", "docs-pipeline")
+
+        # LLM endpoint.
+        env["LLM_BASE_URL"] = config.get("llm-base-url", "")
+        env["LLM_MODEL"] = config.get("llm-model", "gpt-4o")
+
+        # Docs repository.
+        env["DOCS_REPO_URL"] = config.get("docs-repo-url", "")
+        env["MAX_CLONE_SIZE_MB"] = str(config.get("max-clone-size-mb", 50))
+
+        # Secrets: resolve from Juju secret storage.
+        # In production these would be resolved via self.model.get_secret().
+        # For now, pass through from environment if set.
+        for secret_key in ("GIT_PAT", "LLM_API_KEY"):
+            if secret_key in os.environ:
+                env[secret_key] = os.environ[secret_key]
+
+        return env
 
     def _is_worker_running(self) -> bool:
         """
@@ -166,7 +260,9 @@ class DocsPipelineCharm(CharmBase):
         bool
             ``True`` if the worker process exists and has not exited.
         """
-        raise NotImplementedError
+        if self._worker_process is None:
+            return False
+        return self._worker_process.poll() is None
 
 
 if __name__ == "__main__":

@@ -34,6 +34,7 @@ status to stdout.
 """
 
 import asyncio
+import json
 from typing import Optional
 
 import typer
@@ -134,7 +135,56 @@ async def _dispatch(
 
     This is separated from ``main()`` so it can be called directly in tests.
     """
-    raise NotImplementedError
+    # Import here to avoid circular imports at module level.
+    from workflows.ingestion import IngestionWorkflow
+
+    # Build the metadata payload.
+    metadata = PackageMetadata(
+        name=name,
+        version=version,
+        upstream_repo_url=upstream_url,
+        install_method=install_method,
+        snap_channel=snap_channel,
+        architecture=architecture,
+        additional_context=additional_context,
+    )
+
+    # Connect to the Temporal cluster.
+    client = await Client.connect(temporal_host)
+
+    # Generate a deterministic workflow ID for idempotency.
+    workflow_id = f"ingest-{name}-{version}"
+
+    typer.echo(f"Starting IngestionWorkflow: {workflow_id}")
+    typer.echo(f"  Package: {name} v{version}")
+    typer.echo(f"  Upstream: {upstream_url}")
+    typer.echo(f"  Install method: {install_method}")
+    typer.echo(f"  Task queue: {task_queue}")
+
+    handle = await client.start_workflow(
+        IngestionWorkflow.run,
+        metadata,
+        id=workflow_id,
+        task_queue=task_queue,
+    )
+
+    typer.echo(f"Workflow started: {handle.id}")
+
+    if wait:
+        typer.echo("Waiting for workflow completion...")
+        result = await handle.result()
+        typer.echo(f"\nWorkflow completed!")
+        typer.echo(f"  Status: {result.status}")
+        typer.echo(f"  Model used: {result.model_used or 'N/A'}")
+        typer.echo(f"  Prompt tokens: {result.prompt_tokens or 0}")
+        typer.echo(f"  Completion tokens: {result.completion_tokens or 0}")
+        if result.markdown_content:
+            typer.echo(f"  Content length: {len(result.markdown_content)} characters")
+        else:
+            typer.echo("  Content: (empty - insufficient context)")
+    else:
+        typer.echo("Workflow dispatched. Use --wait to block until completion.")
+        typer.echo(f"Monitor at: http://localhost:8233/namespaces/default/workflows/{handle.id}")
 
 
 if __name__ == "__main__":

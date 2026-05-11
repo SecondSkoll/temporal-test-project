@@ -42,7 +42,11 @@ The worker should be configured with:
     LLM_API_KEY=mock-key
 """
 
+import json
 import os
+import uuid
+from datetime import datetime, timezone
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -72,7 +76,45 @@ async def chat_completions(request: Request) -> JSONResponse:
         Markdown document or a ``needs_more_context`` JSON payload, depending
         on ``MOCK_MODE`` and call history.
     """
-    raise NotImplementedError
+    body = await request.json()
+    model = body.get("model", "gpt-4o")
+    messages = body.get("messages", [])
+
+    # Try to extract the package name from the user message for a more
+    # realistic canned response.
+    package_name = "unknown-package"
+    for msg in reversed(messages):
+        if msg.get("role") == "system":
+            content = msg.get("content", "")
+            # Look for the package name in the system prompt.
+            if "`" in content:
+                # Extract text between backticks after "package"
+                parts = content.split("`")
+                if len(parts) >= 2:
+                    package_name = parts[1]
+                    break
+
+    # Track calls for fallback mode.
+    _call_counts[model] = _call_counts.get(model, 0) + 1
+    call_number = _call_counts[model]
+
+    if MOCK_MODE == "success":
+        return JSONResponse(content=_make_success_response(package_name, model))
+
+    elif MOCK_MODE == "fallback":
+        if call_number <= 1:
+            # First call: return needs_more_context.
+            return JSONResponse(content=_make_fallback_response(model))
+        else:
+            # Second call: return success.
+            return JSONResponse(content=_make_success_response(package_name, model))
+
+    elif MOCK_MODE == "insufficient":
+        return JSONResponse(content=_make_fallback_response(model))
+
+    else:
+        # Unknown mode; default to success.
+        return JSONResponse(content=_make_success_response(package_name, model))
 
 
 @app.get("/health")
@@ -85,7 +127,7 @@ async def health() -> dict:
     dict
         ``{"status": "ok", "mode": MOCK_MODE}``
     """
-    raise NotImplementedError
+    return {"status": "ok", "mode": MOCK_MODE}
 
 
 def _make_success_response(package_name: str, model: str) -> dict:
@@ -105,7 +147,73 @@ def _make_success_response(package_name: str, model: str) -> dict:
     dict
         A dict matching the ``ChatCompletion`` OpenAI response schema.
     """
-    raise NotImplementedError
+    markdown = f"""# {package_name}
+
+## Overview
+
+`{package_name}` is a package distributed through Ubuntu infrastructure by Canonical.
+
+## Installation
+
+Install using snap:
+
+```bash
+sudo snap install {package_name}
+```
+
+Or install using apt:
+
+```bash
+sudo apt install {package_name}
+```
+
+## Basic Usage
+
+After installation, run `{package_name}` from the command line:
+
+```bash
+{package_name} --help
+```
+
+## Configuration
+
+Configuration files are located at `/etc/{package_name}/` on Ubuntu systems.
+
+## Troubleshooting
+
+If you encounter issues, check the system logs:
+
+```bash
+journalctl -u snap.{package_name} -f
+```
+
+## Further Reading
+
+- [Ubuntu documentation](https://ubuntu.com/docs)
+- [Canonical support](https://canonical.com/support)
+"""
+
+    return {
+        "id": f"chatcmpl-mock-{uuid.uuid4().hex[:12]}",
+        "object": "chat.completion",
+        "created": int(datetime.now(timezone.utc).timestamp()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": markdown,
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 450,
+            "completion_tokens": 280,
+            "total_tokens": 730,
+        },
+    }
 
 
 def _make_fallback_response(model: str) -> dict:
@@ -126,7 +234,36 @@ def _make_fallback_response(model: str) -> dict:
         A dict matching the ``ChatCompletion`` schema where the content is a
         JSON string: ``{"needs_more_context": true, "requested_files": [...]}``.
     """
-    raise NotImplementedError
+    fallback_content = json.dumps({
+        "needs_more_context": True,
+        "requested_files": [
+            "src/main.py",
+            "docs/architecture.md",
+            "CONTRIBUTING.md",
+        ],
+    })
+
+    return {
+        "id": f"chatcmpl-mock-{uuid.uuid4().hex[:12]}",
+        "object": "chat.completion",
+        "created": int(datetime.now(timezone.utc).timestamp()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": fallback_content,
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 450,
+            "completion_tokens": 50,
+            "total_tokens": 500,
+        },
+    }
 
 
 if __name__ == "__main__":

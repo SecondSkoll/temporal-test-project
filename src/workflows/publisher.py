@@ -38,10 +38,19 @@ Design notes
   context from ``settings.GIT_PAT``.
 """
 
+import tempfile
+from datetime import timedelta
+
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
-from models.generation import GenerationResult
+with workflow.unsafe.imports_passed_through():
+    from models.generation import GenerationResult
+    from activities.git_ops import (
+        commit_and_push_documentation,
+        update_package_index,
+    )
+    from config import settings
 
 
 @workflow.defn
@@ -78,7 +87,56 @@ class GitPublisherWorkflow:
             Raised (non-retryable) after Git push retries are exhausted,
             signalling that operator intervention is required.
         """
-        raise NotImplementedError
+        # Skip publishing for insufficient context results.
+        if result.status == "insufficient_context":
+            workflow.logger.warning(
+                "Skipping publish for %s v%s: insufficient context",
+                result.metadata.name, result.metadata.version,
+            )
+            return ""
+
+        output_path = await self._resolve_output_path(result)
+
+        # For now, use a temporary directory for the docs repo working copy.
+        # In production this would be a persistent checkout path configured
+        # via settings.
+        docs_repo_path = tempfile.mkdtemp(prefix="docs-repo-")
+
+        # ── Step 1: Commit the documentation ─────────────────────────────────
+        commit_sha: str = await workflow.execute_activity(
+            commit_and_push_documentation,
+            args=[result, output_path, docs_repo_path],
+            start_to_close_timeout=timedelta(seconds=60),
+            retry_policy=RetryPolicy(
+                maximum_attempts=5,
+                initial_interval=timedelta(seconds=5),
+                backoff_coefficient=2.0,
+            ),
+        )
+
+        workflow.logger.info(
+            "Documentation committed: %s → %s (SHA: %s)",
+            result.metadata.name, output_path, commit_sha[:8],
+        )
+
+        # ── Step 2: Update the package index ─────────────────────────────────
+        await workflow.execute_activity(
+            update_package_index,
+            args=[result.metadata, commit_sha, output_path, docs_repo_path],
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(
+                maximum_attempts=3,
+                initial_interval=timedelta(seconds=3),
+                backoff_coefficient=2.0,
+            ),
+        )
+
+        workflow.logger.info(
+            "Package index updated for %s v%s",
+            result.metadata.name, result.metadata.version,
+        )
+
+        return commit_sha
 
     async def _resolve_output_path(self, result: GenerationResult) -> str:
         """
@@ -98,4 +156,4 @@ class GitPublisherWorkflow:
             The relative path within the docs repository (e.g.
             ``docs/snapd/2.63.md``).
         """
-        raise NotImplementedError
+        return f"docs/{result.metadata.name}/{result.metadata.version}.md"
